@@ -13,10 +13,17 @@ pkgdesc="Tencent Video Conferencing, tencent meeting 腾讯会议"
 arch=('x86_64' 'aarch64')
 license=('unknown')
 url="https://source.meeting.qq.com/download-center.html"
+
+# Options for screenshare hook mode:
+# - "none"     : Only hook handshake/negotiation. Bypasses all memory copy/color hooks.
+# - "straight" : Hook and copy frame without swapping colors (prevents crashes, keeps correct colors on modern systems).
+# - "swap"     : Hook, copy, and swap BGRx/RGBx color channels (original author's behavior).
+_hook_mode="none"
+
 source_x86_64=("${_pkgname}-${pkgver}-x86_64.deb::https://updatecdn.meeting.qq.com/cos/${_x86_md5}/TencentMeeting_0300000000_${pkgver}_x86_64_default.publish.deb"
 )
 source_aarch64=("${_pkgname}-${_pkgver_arm}-aarch64.deb::https://updatecdn.meeting.qq.com/cos/${_arm_md5}/TencentMeeting_0300000000_${_pkgver_arm}_arm64_default.publish.deb")
-source=("${_pkgname}".sh 'wrap.c')
+source=("${_pkgname}".sh 'wrap.c' 'hook.asm' 'hook.ld' 'patch.py')
 depends=(
     # most deps are not used, but kept for a
     bash
@@ -32,9 +39,10 @@ optdepends=(
     'qt5-wayland: Wayland support'
     'bubblewrap: Fix abnormal text color in dark mode and prevent messing files.'
 )
-makedepends=('patchelf')
+makedepends=('patchelf' 'nasm' 'lld')
 sha512sums=('54488013a8a73c2d2e488a773794f34938dbd0e4eb94e613ff866c6fc2a21321d7d90a3a6462799d6f2375985acb53c4d327d468d086100c5f9aa62934604d1e'
-            'f98e9ae5842c05a19ad4f883c8f9d88ef3b64e04b034e7fd8b23ddca81510f0bd38688ad7c63ddf8badaa727a7b599ceede87419e9694c06d7a4b06138b94c15')
+            'f98e9ae5842c05a19ad4f883c8f9d88ef3b64e04b034e7fd8b23ddca81510f0bd38688ad7c63ddf8badaa727a7b599ceede87419e9694c06d7a4b06138b94c15'
+            'SKIP' 'SKIP' 'SKIP')
 sha512sums_x86_64=('acaa1eba8eccd3a5bd4cb57dc0fadce5c33950857677783944ac2bfbefbed927ca3b4b7d9d0c9e864dcdc3b9f9f8a359c456e9b63b38ac0fa9436fc336aa9ea7')
 sha512sums_aarch64=('6fb54c4972b6ebaf8e1ce576b4ea075ec1b1cd5d02702feef5382712a8bafc2ff85cbd6ab43c90e6e6c55627da77ecc1c8c58f4154e0a160247387f5b2972abc')
 
@@ -71,6 +79,13 @@ prepare() {
 
     find modules/ -type f -name '*.so' | xargs -I {} patchelf --set-rpath '$ORIGIN:/usr/lib/wemeet' {}
     popd
+
+    # Apply screenshare patch
+    if [ "$_hook_mode" = "none" ]; then
+        python3 "$srcdir/patch.py" --no-color-hook "$srcdir/opt/$_pkgname"
+    else
+        python3 "$srcdir/patch.py" "$srcdir/opt/$_pkgname"
+    fi
 }
 
 build() {
@@ -79,6 +94,14 @@ build() {
     read -ra libpulse_args < <(pkgconf --cflags --libs libpulse)
     # Comment out `-D WRAP_FORCE_SINK_HARDWARE` to disable the patch that forces wemeet detects sink as hardware sink
     "${CC:-cc}" $CFLAGS -Wall -Wextra -fPIC -shared "${openssl_args[@]}" "${libpulse_args[@]}" -o libwemeetwrap.so wrap.c -D WRAP_FORCE_SINK_HARDWARE
+
+    # Compile libhook.so
+    local nasm_flags=""
+    if [ "$_hook_mode" = "swap" ]; then
+        nasm_flags="-dSWAP_COLORS"
+    fi
+    nasm $nasm_flags -felf64 hook.asm -o hook.o
+    ld.lld --gc-sections --build-id=none -z noseparate-code -z now -shared -e 0 -T hook.ld -L/usr/lib64 -lc hook.o -o libhook.so
 }
 
 package() {
@@ -108,5 +131,5 @@ package() {
     cp -r bin "$pkgdir/opt/$_pkgname"
     ln -s raw/xcast.conf "$pkgdir/opt/$_pkgname/bin/xcast.conf"
     install -Dm755 "$srcdir/libwemeetwrap.so" -t "$pkgdir/usr/lib/$_pkgname"
-
+    install -Dm755 "$srcdir/libhook.so" -t "$pkgdir/usr/lib/$_pkgname"
 }
