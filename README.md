@@ -19,7 +19,8 @@ screencopy {
 }
 ```
 
-* Hyprland推荐使用`xdg-desktop-portal-hyprland`并没有颜色握手问题，所以不需要使用`swap`模式，推荐使用`none`模式。
+* Hyprland推荐使用`xdg-desktop-portal-hyprland`并没有颜色握手问题，所以不需要使用`swap`模式，推荐先尝试使用`none`模式，如果发现会Crash可以尝试使用`straight`模式。
+  * 具体的模式实现见下方介绍，Hyprland更新后似乎又需要`straight`模式了
 
 ---
 
