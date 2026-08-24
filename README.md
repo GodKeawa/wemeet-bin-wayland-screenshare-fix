@@ -43,15 +43,16 @@ libxcast.so + 0xfedd10
 libscreen_share_module.so + 0x6b196d
 ```
 
-崩溃时 `rep movsb` 的源指针与内核报告的缺页地址相同，说明问题位于帧缓冲生命周期，而不是 Portal、PipeWire 服务退出或颜色协商失败。启用 `straight` 后，帧会在映射有效时复制到私有缓冲区；配合 `force_shm` 的两轮人工共享测试均正常结束，且没有新增 core dump。
+崩溃时 `rep movsb` 的源指针与内核报告的缺页地址相同，说明问题位于帧缓冲生命周期，而不是颜色协商失败。
 
-因此，对上述版本组合建议直接使用：
+后续重复测试表明，`straight` **只能降低竞态概率，不能彻底解决问题**。最初两轮短时测试正常结束，但之后连续两次共享均发生崩溃：
 
-```bash
-_hook_mode="straight"
-```
+1. 一次直接崩溃在 `libhook.so` 的 `getenv.loop_64px` AVX2 复制循环。hook 先用 `msync` 检查映射是否存在，但复制约 64 KiB 后源映射即被异步解除，说明该检查存在 TOCTOU，不能固定映射生命周期。
+2. 另一次崩溃在 `pw_stream_queue_buffer()`，客户端尝试操作已经失效的 PipeWire 缓冲区引用；同时 XDPH 日志出现多次 `Out of buffers`、重试和流销毁。
 
-该模式不定义 `SWAP_COLORS`，不会执行 BGRx/RGBx 通道翻转。若需要确认实际使用了 SHM，可以查看：
+因此，不应把 `straight + force_shm` 描述为这套版本组合的稳定修复。`straight` 不定义 `SWAP_COLORS`、不会执行 BGRx/RGBx 通道翻转，但其当前实现仍属于实验性 workaround。若继续实验，应保留 core dump 并重点检查 `libhook.so` 复制循环和 `pw_stream_queue_buffer()` 调用链。
+
+若需要确认实际使用了 SHM，可以查看：
 
 ```bash
 journalctl --user -u xdg-desktop-portal-hyprland.service | grep 'force_shm'
