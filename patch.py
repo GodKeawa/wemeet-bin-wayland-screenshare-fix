@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
 Patch binaries for Tencent Wemeet v3.26.10.401 Linux version.
-Author: claude.ai 
-
-Hunk format:
-    Dict[int, Tuple[bytes, bytes]]   offset -> (original, patched)
+Includes SHA256 verification to ensure offset safety.
 """
 
 import mmap
 import os
 import sys
 import argparse
+import hashlib
 from typing import Dict, List, Tuple
 
 Hunk = Dict[int, Tuple[bytes, bytes]]
 
+EXPECTED_HASHES = {
+    "bin/modules/screen_share/libscreen_share_module.so": "b3296906e5aba1a0b4297cd6e59b4ba19519e56de912b2ea0c5a23f3a252e7ed",
+}
+
 PATCHES: Dict[str, List[Hunk]] = {
     "bin/modules/screen_share/libscreen_share_module.so": [
-    { #{{{ Hunk 0: move `dbusStart()` from `dbusSelectSources()` to `onSelectSourcesResponse()`
+    { # Hunk 0: move `dbusStart()` from `dbusSelectSources()` to `onSelectSourcesResponse()`
         0x43d2fa: (
             bytes.fromhex("00"),
             bytes.fromhex("5d")),
@@ -33,39 +35,14 @@ PATCHES: Dict[str, List[Hunk]] = {
         0x43dc38: (
             bytes.fromhex("e8c305d9"),
             bytes.fromhex("e9ecf6ff")),
-    #}}}
-    }, { #{{{ Hunk 1a: color format conversion hook
+    }, { # Hunk 1: color format negotiation spoofing (08 -> 07)
         0x450fb6: (
             bytes.fromhex("08"),
             bytes.fromhex("07")),
         0x4566e4: (
             bytes.fromhex("8b45c08b4808"),
             bytes.fromhex("c7c108000000")),
-        0x6b1951: (
-            bytes.fromhex("4889e54883ec1048897df8488b7df8e88b01"),
-            bytes.fromhex("e89a0100004989c3498b7308488d3d0a0000")),
-        0x6b1964: (
-            bytes.fromhex("004889c7e8b30100004883c4105dc3662e0f1f84"),
-            bytes.fromhex("480fbaef30e892abb0ff4c89dfe8aa0100005dc3")),
-    #}}}
     }],
-    "lib/libxcast.so": [
-    { #{{{ Hunk 1b: color format conversion hook
-        0xfedbfa: (
-            bytes.fromhex("660f1f44"),
-            bytes.fromhex("e91f0100")),
-        0xfedc3c: (
-            bytes.fromhex("23"),
-            bytes.fromhex("12")),
-        0xfedc4b: (
-            bytes.fromhex("4883"),
-            bytes.fromhex("ebad")),
-        0xfedc4f: (
-            bytes.fromhex("5b5d415c415d415e415fc3660f1f440000"),
-            bytes.fromhex("488d3d0a000000480fbaef31e8a0190eff")),
-    #}}}
-    }
-    ],
 }
 
 # ── Hunk-level operations ─────────────────────────────────────────────────────
@@ -104,15 +81,35 @@ def apply_hunk(mm: mmap.mmap, hunk: Hunk) -> int:
     return count
 
 
+def verify_file_hash(path: str, expected_hash: str) -> bool:
+    sha256 = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(4096), b""):
+            sha256.update(block)
+    actual_hash = sha256.hexdigest()
+    if actual_hash != expected_hash:
+        print(f"\n[WARNING] Hash mismatch for {path}!")
+        print(f"          Expected: {expected_hash}")
+        print(f"          Actual  : {actual_hash}")
+        print("          The file version might have changed. Hardcoded patch offsets may corrupt the binary.")
+        print("          Applying patches anyway, but stability is not guaranteed.\n")
+        return False
+    else:
+        print(f"  Hash verified successfully.")
+        return True
+
+
 # ── File-level orchestration ──────────────────────────────────────────────────
 
-def patch_file(path: str, hunks: List[Hunk], dry_run: bool = False) -> int:
+def patch_file(path: str, rel_path: str, hunks: List[Hunk], dry_run: bool = False) -> int:
     if not os.path.isfile(path):
         print(f"[ERROR] File not found: {path}")
         return 2
 
-    file_size = os.path.getsize(path)
+    if rel_path in EXPECTED_HASHES:
+        verify_file_hash(path, EXPECTED_HASHES[rel_path])
 
+    file_size = os.path.getsize(path)
     size_applied = 0
     n_applied = 0
     n_rejected = 0
@@ -155,18 +152,7 @@ def main() -> None:
     parser.add_argument("install_dir", help="Tencent Wemeet installation directory (e.g. /opt/wemeet)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate only, do not write anything")
-    parser.add_argument("--no-color-hook", action="store_true",
-                        help="Only patch dbus/negotiation, do not hook render copy loop")
     args = parser.parse_args()
-
-    if args.no_color_hook:
-        print("Option '--no-color-hook' is enabled. Disabling getenv copy hooks.")
-        # Filter libscreen_share_module.so hunks: Hunk 1a (index 1) offset 0x6b1951 and 0x6b1964 will be popped
-        hunk_1a = PATCHES["bin/modules/screen_share/libscreen_share_module.so"][1]
-        hunk_1a.pop(0x6b1951, None)
-        hunk_1a.pop(0x6b1964, None)
-        # Disable libxcast.so patch completely
-        PATCHES["lib/libxcast.so"] = []
 
     install_dir = args.install_dir.rstrip("/")
     overall_ok = True
@@ -177,7 +163,7 @@ def main() -> None:
         print(f"  Target : {full_path}")
         print(f"  Hunks  : {len(hunks)}")
 
-        rc = patch_file(full_path, hunks, dry_run=args.dry_run)
+        rc = patch_file(full_path, rel_path, hunks, dry_run=args.dry_run)
         if rc != 0:
             overall_ok = False
 

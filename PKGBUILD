@@ -23,7 +23,7 @@ _hook_mode="none"
 source_x86_64=("${_pkgname}-${pkgver}-x86_64.deb::https://updatecdn.meeting.qq.com/cos/${_x86_md5}/TencentMeeting_0300000000_${pkgver}_x86_64_default.publish.deb"
 )
 source_aarch64=("${_pkgname}-${_pkgver_arm}-aarch64.deb::https://updatecdn.meeting.qq.com/cos/${_arm_md5}/TencentMeeting_0300000000_${_pkgver_arm}_arm64_default.publish.deb")
-source=("${_pkgname}".sh 'wrap.c' 'hook.asm' 'hook.ld' 'patch.py')
+source=("${_pkgname}".sh 'wrap.c' 'libhook.c' 'patch.py')
 depends=(
     # most deps are not used, but kept for a
     bash
@@ -39,12 +39,11 @@ optdepends=(
     'qt5-wayland: Wayland support'
     'bubblewrap: Fix abnormal text color in dark mode and prevent messing files.'
 )
-makedepends=('patchelf' 'nasm' 'lld')
+makedepends=('patchelf')
 sha512sums=('39af4859c2f701d985267478d6ac9d55b2396d3f236f5049256924d310c62ab4ddb77bdef148308f73a951a54d01c9e84222a2d9e7d1448b091f0e02c2fc42c0'
             'f98e9ae5842c05a19ad4f883c8f9d88ef3b64e04b034e7fd8b23ddca81510f0bd38688ad7c63ddf8badaa727a7b599ceede87419e9694c06d7a4b06138b94c15'
-            '299d0231a714db1ed0286716cfbe3cb753e4c27c37bf64bc91428a6dbc7fb948c6d2365d3ba01fda3df541b608656e4b76d0cb8994b237ce6afb0f0ea8932195'
-            '2788807f62b9a239b2c7ddc5e902957a22e868a1df4fd495765966b2ffabb1d315d96c384b4cc8aff76ea59f7dd8f82c344ecea7f047393414a12146acbad433'
-            '8a60af69831470d37229f708ae273dad5ff62afa222d55ccd2775f735271f503c79397306dd5cfca426919ace4b09fd29c3dce79faefc16b861c352a29f44cc8')
+            '56baff70484839b28756ffd6633ec42ec560180a09f39e55fe5a07c96eb03210e0df96a1ef0c91e3310ec63c38df535be70351d167c67e5845981dfb56540809'
+            '3c0d8f202b43fd959e85717ce528cebeb6fbb18879b947b6f64e7502a59ae0d6c9faa2cac9d9803d084299037d313553418f13ba037c4cbaf7094131c0f1572b')
 sha512sums_x86_64=('acaa1eba8eccd3a5bd4cb57dc0fadce5c33950857677783944ac2bfbefbed927ca3b4b7d9d0c9e864dcdc3b9f9f8a359c456e9b63b38ac0fa9436fc336aa9ea7')
 sha512sums_aarch64=('6fb54c4972b6ebaf8e1ce576b4ea075ec1b1cd5d02702feef5382712a8bafc2ff85cbd6ab43c90e6e6c55627da77ecc1c8c58f4154e0a160247387f5b2972abc')
 
@@ -83,11 +82,7 @@ prepare() {
     popd
 
     # Apply screenshare patch
-    if [ "$_hook_mode" = "none" ]; then
-        python3 "$srcdir/patch.py" --no-color-hook "$srcdir/opt/$_pkgname"
-    else
-        python3 "$srcdir/patch.py" "$srcdir/opt/$_pkgname"
-    fi
+    python3 "$srcdir/patch.py" "$srcdir/opt/$_pkgname"
 }
 
 build() {
@@ -98,12 +93,12 @@ build() {
     "${CC:-cc}" $CFLAGS -Wall -Wextra -fPIC -shared "${openssl_args[@]}" "${libpulse_args[@]}" -o libwemeetwrap.so wrap.c -D WRAP_FORCE_SINK_HARDWARE
 
     # Compile libhook.so
-    local nasm_flags=""
+    local cflags="-O3 -shared -fPIC -mavx2 -ldl"
     if [ "$_hook_mode" = "swap" ]; then
-        nasm_flags="-dSWAP_COLORS"
+        cflags="$cflags -DWEMEET_HOOK_MODE_SWAP"
     fi
-    nasm $nasm_flags -felf64 hook.asm -o hook.o
-    ld.lld --gc-sections --build-id=none -z noseparate-code -z now -shared -e 0 -T hook.ld -L/usr/lib64 -lc hook.o -o libhook.so
+    read -ra pipewire_args < <(pkgconf --cflags libpipewire-0.3)
+    "${CC:-cc}" $cflags -o libhook.so libhook.c "${pipewire_args[@]}"
 }
 
 package() {
