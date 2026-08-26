@@ -1,12 +1,5 @@
 #!/bin/sh
 set -eu
-# Filter out literal "%u" argument which is passed by some desktop launchers when no URL is provided
-# for arg do
-#     if [ -n "$arg" ] && [ "$arg" != "%u" ]; then
-#         set -- "$@" "$arg"
-#     fi
-#     shift
-# done
 export QT_AUTO_SCREEN_SCALE_FACTOR=1
 export QT_STYLE_OVERRIDE=fusion                                       # 解决使用自带 Qt 情况下，字体颜色全白看不到的问题
 export IBUS_USE_PORTAL=1                                              # fix ibus

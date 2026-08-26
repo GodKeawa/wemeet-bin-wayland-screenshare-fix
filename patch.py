@@ -14,7 +14,7 @@ from typing import Dict, List, Tuple
 Hunk = Dict[int, Tuple[bytes, bytes]]
 
 EXPECTED_HASHES = {
-    "bin/modules/screen_share/libscreen_share_module.so": "b3296906e5aba1a0b4297cd6e59b4ba19519e56de912b2ea0c5a23f3a252e7ed",
+    "bin/modules/screen_share/libscreen_share_module.so": "925e7c16a5d69adaa804d1ea55aac1edc4093aacb5324948ea6f38a71abd4e16",
 }
 
 PATCHES: Dict[str, List[Hunk]] = {

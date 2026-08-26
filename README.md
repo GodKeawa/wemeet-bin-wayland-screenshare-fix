@@ -23,25 +23,27 @@ Wemeet 在 Linux 下的屏幕共享依赖于底层的 `xdg-desktop-portal`（用
 ### 3：TOCTOU 内存卸载
 
 * **标准流程**：PipeWire 触发回调 -> 客户端借出共享内存 (SHM) 帧 -> 客户端渲染完毕 -> 客户端归还帧。
-* **Wemeet 的缺陷 (最严重的崩溃)**：Wemeet 拿到帧内存指针后，直接扔给后台线程 (`libxcast.so`) 异步处理，但**并没有按规范锁定该内存池**。当系统负载较高或分辨率极高时（如 4K 拷贝耗时较长），Wemeet 处理过慢会导致系统 Portal 耗尽缓冲池 (`Out of buffers`)，进而强行剥夺并 `unmap` 该块内存。此时 Wemeet 仍在复制该内存，瞬间触发 `SIGSEGV` 段错误闪退。这就是典型的 **TOCTOU (Time-of-check to time-of-use)** 竞态条件。
+* **Wemeet 的缺陷**：Wemeet 拿到帧内存指针后，直接扔给后台线程 (`libxcast.so`) 异步处理，但**并没有按规范锁定该内存池**。当系统负载较高或分辨率较高时，Wemeet 处理过慢会导致系统 Portal 耗尽缓冲池 (`Out of buffers`)，进而强行剥夺并 `unmap` 该块内存。此时 Wemeet 仍在复制该内存，瞬间触发 `SIGSEGV` 段错误闪退。这是典型的 **TOCTOU** 竞态条件。
 
 ---
 
 ## 修复方案
 
-### 1 修复 DBus 竞态与颜色格式 (`patch.py`)
+### 1. 修复 DBus 竞态与颜色格式协商 (`patch.py`)
 
-* **握手修复**：我们使用 Python 脚本对二进制文件进行微调，将 `Start` 请求的调用强行移入 `SelectSources` 的成功回调函数内部。强制 Wemeet 遵循严格的同步时序。
-* **格式欺骗**：将硬编码的 `BGRx` 请求篡改为 `RGBx` 以通过协商，并在收到系统响应后篡改回 `BGRx`，骗过 Wemeet 的内部检查。
+* **握手修复**：使用 Python 脚本对二进制文件进行微调，将 `Start` 请求调用强行移入 `SelectSources` 的成功回调内部。强制 Wemeet 遵循严格的同步时序，解决无法开始共享的问题。
+* **格式欺骗**：部分后端（如 xdg-desktop-portal-hyprland）在协商阶段优先甚至强制要求 `RGBx`，而 Wemeet 硬编码只请求 `BGRx` 导致协商失败。我们将请求强行篡改为 `RGBx` 骗过系统，再将响应篡改回 `BGRx` 骗过 Wemeet 的内部检查。
 
-### 2 修复内存生命周期 (`libhook.so`)
+### 2. 视频帧缓存与传递 (`libhook.so`)
 
-为了解决 TOCTOU 崩溃，我们编写了纯 C 语言的原生拦截库 (`libhook.so`)，利用 `LD_PRELOAD` 和 `dlsym` 拦截 PipeWire 底层 API，**彻底解耦系统缓冲池与 Wemeet 的处理周期**：
+为了解决 TOCTOU 崩溃，我们作为中介代替Wemeet管理PipeWire的Buffers，同时将我们的静态Buffer直接提供给Wemeet：
 
-1. 拦截 `pw_stream_dequeue_buffer`。当 Wemeet 想要获取帧时，C 代码瞬间将真实画面拷贝到我们自己申请的私有堆内存中。
-2. 拷贝完成（微秒级）后，C 代码**立刻替 Wemeet 归还**真实的内存给系统。这样系统缓冲池永远不会枯竭，流永远不会被强行销毁。
-3. 我们将指向私有内存的假 Buffer 塞给 Wemeet。不论 Wemeet 怎么异步拖沓，它操作的永远是我们绝对安全的私有内存，从根本上杜绝了段错误。
-   *(注：颜色通道的红蓝翻转也在这一步利用 AVX2 指令集高效完成。)*
+1. **PipeWire 帧缓存**：
+   在 Wemeet 的 PipeWire 线程索要画面时，C 代码将真实画面拷贝到我们预先分配的**静态内存池**中。拷贝完成后，C 代码**在同一个线程内立刻替 Wemeet 归还内存**。这样便可遵守 PipeWire 规范，保证系统缓冲池充裕，解决 `Out of buffers` 和内存卸载导致的段错误。
+2. **libxcast.so 帧传递**：
+   `libhook.so` 会在运行时自动扫描 Wemeet 内部组件 `libxcast.so` 的内存，利用特征码找到其 2D 渲染拷贝函数 (`copy_image`)，并实时植入Trampoline Hook，从而劫持 Wemeet 自身的渲染管线，我们将之前缓存到静态buffer中的帧传递给后续处理逻辑，保证内存稳定。
+3. **AVX-512 / AVX2 加速**：
+   当 Wemeet 处理我们的 Fake Buffer 时，其渲染过程被我们的 Hook 拦截。我们使用纯 C/SIMD 代码替换掉 Wemeet 的拷贝循环，利用 GCC `__builtin_cpu_supports` 进行探测，如果您的 CPU 支持，将会启动 AVX-512 或 AVX2 指令集 进行操作。
 
 ---
 
@@ -49,7 +51,7 @@ Wemeet 在 Linux 下的屏幕共享依赖于底层的 `xdg-desktop-portal`（用
 
 ### 前置配置 (针对 Hyprland)
 
-Hyprland 默认使用 GPU 零拷贝 (DMA-BUF) 分配显存，但 Wemeet 非常原始，只支持读取普通系统内存。因此您必须强制 Hyprland 提供 SHM 内存：
+Hyprland 默认使用 GPU 零拷贝 (DMA-BUF) 分配显存，但 Wemeet 只支持读取普通系统内存。因此必须强制 Hyprland 提供 SHM 内存：
 
 ```ini
 # ~/.config/hypr/xdph.conf
@@ -58,25 +60,30 @@ screencopy {
 }
 ```
 
-### 编译模式选择
+### 编译选项配置
 
-在本项目根目录的 [PKGBUILD](PKGBUILD) 中，约第 18 行提供了 `_hook_mode` 选项以应对不同环境的需求：
+在本项目根目录的 [PKGBUILD](PKGBUILD) 中，约第 18 行提供了宏配置选项：
 
 ```bash
 # Options for screenshare hook mode:
-# - "none"     : 仅应用 Python DBus 握手补丁，不启动 C 语言的 PipeWire 内存拦截。
-# - "straight" : 开启 C 语言 PipeWire 内存拦截，彻底修复 TOCTOU 闪退崩溃，但不翻转颜色。
-# - "swap"     : 开启 C 语言 PipeWire 内存拦截，并在 C 中利用 AVX2 高效翻转 BGRx/RGBx 颜色通道。
-_hook_mode="none"
+# - "none"     : 仅应用 Python DBus 握手补丁，不启动 C 语言的 PipeWire 内存拦截
+# - "straight" : 开启视频帧缓存，修复 TOCTOU 闪退崩溃
+# - "swap"     : 开启视频帧缓存，并在拷贝时利用 AVX 翻转 BGRx/RGBx 颜色通道（如遇偏色可开启）
+_hook_mode="straight"
+
+# Options for debug mode:
+# - 0 : Disable debug logs.
+# - 1 : Enable detailed debug logs (printed to stderr).
+_debug_mode=1
 ```
 
-*(由于目前 Hyprland 的色彩没有问题，所以不需要swap，建议首选 `"straight"`。)*
+*(目前的 Hyprland 没有颜色问题，建议首选 `"straight"` 模式并开启调试，并不会打印大量log)*
 
 ### 部署步骤
 
-1. 克隆本仓库，根据需要修改 `PKGBUILD` 中的 `_hook_mode`。
+1. 克隆本仓库，根据需要调整 `PKGBUILD`。
 2. 运行打包并安装：
 
 ```bash
-makepkg -sicf
+makepkg -sicf (--skipchecksums)
 ```
